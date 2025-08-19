@@ -125,8 +125,19 @@ func (r *RuijieClient) RedirectToPortal(redirectURL string) (map[string]string, 
 		}
 	}
 
-	// Check if we reached the portal
+	// Check if we reached the portal or if we're already logged in
 	if !strings.Contains(resp.Request.URL, "portal-main") {
+		// If we're already logged in, we might get redirected to a different URL
+		// Let's try to extract session info from the current URL or use a default approach
+		if strings.Contains(resp.Request.URL, "auth1.ysu.edu.cn") {
+			// We're still on the auth server, try to get session info from the response
+			// For logged-in users, we can try to extract session info differently
+			r.log(fmt.Sprintf("Already logged in, trying alternative session extraction from: %s", resp.Request.URL))
+
+			// Try to get session info from the response body or use a different approach
+			// For now, let's try to make a direct request to get session info
+			return r.getSessionInfoForLoggedInUser()
+		}
 		return nil, fmt.Errorf("portal redirection failed. Expected URL to contain 'portal-main', but got: %s", resp.Request.URL)
 	}
 
@@ -143,6 +154,62 @@ func (r *RuijieClient) RedirectToPortal(redirectURL string) (map[string]string, 
 		}
 	}
 
+	return params, nil
+}
+
+// getSessionInfoForLoggedInUser gets session info for already logged in users
+func (r *RuijieClient) getSessionInfoForLoggedInUser() (map[string]string, error) {
+	// For logged-in users, we can try to get session info from the user info
+	userInfo, err := r.GetOnlineUserInfo("")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user info: %w", err)
+	}
+
+	// Extract session info from user info if available
+	params := make(map[string]string)
+
+	// Try to get session ID from portal info
+	if portalInfo, ok := userInfo["portalOnlineUserInfo"].(map[string]interface{}); ok {
+		if sessionId, ok := portalInfo["sessionId"].(string); ok {
+			params["sessionId"] = sessionId
+		}
+		if userIp, ok := portalInfo["userIp"].(string); ok {
+			params["userIp"] = userIp
+		}
+		if nasIp, ok := portalInfo["nasIp"].(string); ok {
+			params["nasIp"] = nasIp
+		}
+		if userMac, ok := portalInfo["userMac"].(string); ok {
+			params["userMac"] = userMac
+		}
+		if ssid, ok := portalInfo["ssid"].(string); ok {
+			params["ssid"] = ssid
+		}
+	}
+
+	// If we don't have a sessionId, generate a default one
+	if params["sessionId"] == "" {
+		params["sessionId"] = "114514"
+	}
+
+	// Set default values for missing parameters
+	if params["customPageId"] == "" {
+		params["customPageId"] = "1"
+	}
+	if params["userIp"] == "" {
+		params["userIp"] = "10.0.0.1"
+	}
+	if params["nasIp"] == "" {
+		params["nasIp"] = "10.0.0.1"
+	}
+	if params["userMac"] == "" {
+		params["userMac"] = "00:00:00:00:00:00"
+	}
+	if params["ssid"] == "" {
+		params["ssid"] = ""
+	}
+
+	r.log(fmt.Sprintf("Generated session info for logged-in user: %v", params))
 	return params, nil
 }
 
