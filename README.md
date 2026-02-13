@@ -4,13 +4,12 @@
 
 ## 功能特性
 
-- **网络登录**: 支持用户名密码登录，自动处理验证码
+- **网络登录**: 通过CAS-SSO直接登录，使用AES-ECB加密认证
 - **服务选择**: 支持多种网络服务（校园网、中国联通、中国电信、中国移动）
 - **状态检查**: 查看当前登录状态和用户信息
 - **账户信息**: 获取详细的账户信息
 - **网络登出**: 安全退出网络连接
 - **代理支持**: 支持HTTP/HTTPS/SOCKS5代理
-- **验证码处理**: 自动检测验证码需求，支持ASCII艺术显示和文件保存
 - **交互式操作**: 支持交互式输入用户名、密码和服务选择
 
 ## 安装
@@ -99,16 +98,15 @@ export HTTPS_PROXY=https://proxy.example.com:8080
 ./ruijie-go status --verbose
 ```
 
-## 验证码处理
+## 认证流程
 
-当系统要求输入验证码时，工具会：
+工具使用CAS-SSO直接登录流程（与浏览器实际使用的流程一致）：
 
-1. 自动检测验证码需求
-2. 下载验证码图片
-3. 显示ASCII艺术版本的验证码
-4. 保存验证码图片到临时文件并自动打开
-5. 提示用户输入验证码
-6. 自动清理临时文件
+1. 重定向到门户获取会话信息（sessionId等参数）
+2. 访问 `cas-sso/login` 页面，提取AES密钥（croypto）和流程密钥（execution）
+3. 使用AES-ECB加密密码，提交登录表单
+4. 验证登录成功（检查ticket或auth-success重定向）
+5. 选择网络服务并完成认证
 
 ## 配置文件
 
@@ -147,13 +145,13 @@ ruijie-go/
 │   └── info.go            # 信息命令
 ├── internal/
 │   ├── client/            # 客户端实现
-│   │   ├── ruijie.go      # 锐捷客户端
-│   │   └── cas.go         # CAS认证
+│   │   ├── ruijie.go      # 锐捷客户端（含CAS-SSO登录）
+│   │   └── cas.go         # （已废弃）
 │   ├── config/            # 配置管理
 │   │   └── config.go
 │   └── utils/             # 工具函数
-│       ├── crypto.go      # 加密工具
-│       ├── captcha.go     # 验证码处理
+│       ├── crypto.go      # AES-ECB加密工具
+│       ├── captcha.go     # 验证码处理（已废弃）
 │       └── display.go     # 输出格式化
 ├── go.mod
 └── README.md
@@ -191,6 +189,13 @@ GOOS=darwin GOARCH=amd64 go build -o ruijie-go-darwin-amd64
 欢迎提交Issue和Pull Request！
 
 ## 更新日志
+
+### v2.0.0
+- 使用CAS-SSO直接登录替代旧的CAS+SAM认证流程
+- 加密方式从AES-CBC切换为AES-ECB（匹配新的认证接口）
+- 移除验证码处理（新流程不需要）
+- 修复重定向URL追踪问题
+- 修复JavaScript重定向解析问题
 
 ### v1.0.0
 - 完整的Go语言重写

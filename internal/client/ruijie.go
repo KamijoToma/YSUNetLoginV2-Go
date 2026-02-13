@@ -9,6 +9,7 @@ import (
 
 	"ruijie-go/internal/utils"
 
+	"github.com/PuerkitoBio/goquery"
 	"github.com/go-resty/resty/v2"
 )
 
@@ -108,41 +109,36 @@ func (r *RuijieClient) RedirectToPortal(redirectURL string) (map[string]string, 
 		return nil, fmt.Errorf("failed to redirect to portal: %w", err)
 	}
 
-	// Handle JavaScript redirect
+	// Get final URL after redirects
+	finalURL := resp.RawResponse.Request.URL.String()
+	r.log(fmt.Sprintf("Portal redirect final URL: %s", finalURL))
+
+	// Handle JavaScript redirect (e.g. top.self.location.href='...')
 	if strings.Contains(resp.String(), "location.href=") {
-		// Extract redirect URL from JavaScript
 		content := resp.String()
-		start := strings.Index(content, "location.href=") + len("location.href=")
-		if start > len("location.href=")-1 {
+		start := strings.Index(content, "location.href='")
+		if start >= 0 {
+			start += len("location.href='")
 			end := strings.Index(content[start:], "'")
 			if end > 0 {
-				redirectURL2 := content[start+1 : start+end]
+				redirectURL2 := content[start : start+end]
+				r.log(fmt.Sprintf("Following JS redirect to: %s", redirectURL2))
 				resp, err = r.client.R().Get(redirectURL2)
 				if err != nil {
 					return nil, fmt.Errorf("failed to follow JavaScript redirect: %w", err)
 				}
+				finalURL = resp.RawResponse.Request.URL.String()
+				r.log(fmt.Sprintf("JS redirect final URL: %s", finalURL))
 			}
 		}
 	}
 
-	// Check if we reached the portal or if we're already logged in
-	if !strings.Contains(resp.Request.URL, "portal-main") {
-		// If we're already logged in, we might get redirected to a different URL
-		// Let's try to extract session info from the current URL or use a default approach
-		if strings.Contains(resp.Request.URL, "auth1.ysu.edu.cn") {
-			// We're still on the auth server, try to get session info from the response
-			// For logged-in users, we can try to extract session info differently
-			r.log(fmt.Sprintf("Already logged in, trying alternative session extraction from: %s", resp.Request.URL))
-
-			// Try to get session info from the response body or use a different approach
-			// For now, let's try to make a direct request to get session info
-			return r.getSessionInfoForLoggedInUser()
-		}
-		return nil, fmt.Errorf("portal redirection failed. Expected URL to contain 'portal-main', but got: %s", resp.Request.URL)
+	if !strings.Contains(finalURL, "portal-main") {
+		return nil, fmt.Errorf("portal redirection failed. Expected URL to contain 'portal-main', but got: %s", finalURL)
 	}
 
 	// Parse URL parameters
-	parsedURL, err := url.Parse(resp.Request.URL)
+	parsedURL, err := url.Parse(finalURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse portal URL: %w", err)
 	}
@@ -154,62 +150,6 @@ func (r *RuijieClient) RedirectToPortal(redirectURL string) (map[string]string, 
 		}
 	}
 
-	return params, nil
-}
-
-// getSessionInfoForLoggedInUser gets session info for already logged in users
-func (r *RuijieClient) getSessionInfoForLoggedInUser() (map[string]string, error) {
-	// For logged-in users, we can try to get session info from the user info
-	userInfo, err := r.GetOnlineUserInfo("")
-	if err != nil {
-		return nil, fmt.Errorf("failed to get user info: %w", err)
-	}
-
-	// Extract session info from user info if available
-	params := make(map[string]string)
-
-	// Try to get session ID from portal info
-	if portalInfo, ok := userInfo["portalOnlineUserInfo"].(map[string]interface{}); ok {
-		if sessionId, ok := portalInfo["sessionId"].(string); ok {
-			params["sessionId"] = sessionId
-		}
-		if userIp, ok := portalInfo["userIp"].(string); ok {
-			params["userIp"] = userIp
-		}
-		if nasIp, ok := portalInfo["nasIp"].(string); ok {
-			params["nasIp"] = nasIp
-		}
-		if userMac, ok := portalInfo["userMac"].(string); ok {
-			params["userMac"] = userMac
-		}
-		if ssid, ok := portalInfo["ssid"].(string); ok {
-			params["ssid"] = ssid
-		}
-	}
-
-	// If we don't have a sessionId, generate a default one
-	if params["sessionId"] == "" {
-		params["sessionId"] = "114514"
-	}
-
-	// Set default values for missing parameters
-	if params["customPageId"] == "" {
-		params["customPageId"] = "1"
-	}
-	if params["userIp"] == "" {
-		params["userIp"] = "10.0.0.1"
-	}
-	if params["nasIp"] == "" {
-		params["nasIp"] = "10.0.0.1"
-	}
-	if params["userMac"] == "" {
-		params["userMac"] = "00:00:00:00:00:00"
-	}
-	if params["ssid"] == "" {
-		params["ssid"] = ""
-	}
-
-	r.log(fmt.Sprintf("Generated session info for logged-in user: %v", params))
 	return params, nil
 }
 
@@ -248,40 +188,86 @@ func (r *RuijieClient) getCurrentNode(sessionInfo map[string]string, flowKey str
 	return nodeResp, nil
 }
 
-// SAMLogin performs SAM login
-func (r *RuijieClient) SAMLogin(sessionInfo map[string]string) error {
+// CasSSOLogin performs direct CAS-SSO authentication (new method replacing CAS+SAM)
+func (r *RuijieClient) CasSSOLogin(username, password string, sessionInfo map[string]string) error {
 	sessionID := sessionInfo["sessionId"]
 	customPageID := sessionInfo["customPageId"]
 	nasIP := sessionInfo["nasIp"]
 	userIP := sessionInfo["userIp"]
 	ssid := sessionInfo["ssid"]
-	userMac := sessionInfo["userMac"]
+	mode := sessionInfo["mode"]
 
-	samURL := fmt.Sprintf("https://auth1.ysu.edu.cn/sam-sso/login?flowSessionId=%s&customPageId=%s&preview=false&appType=normal&language=zh-CN&nasIp=%s&userIp=%s&ssid=%s&userMac=%s",
-		sessionID, customPageID, nasIP, userIP, ssid, userMac)
+	timer := fmt.Sprintf("%d", time.Now().UnixMilli())
+	casSSOURL := fmt.Sprintf(
+		"https://auth1.ysu.edu.cn/cas-sso/login?flowSessionId=%s&customPageId=%s&preview=false&appType=normal&language=zh-CN&mode=%s&timer=%s&nasIp=%s&userIp=%s&ssid=%s",
+		sessionID, customPageID, mode, timer, nasIP, userIP, ssid,
+	)
 
-	resp, err := r.client.R().
-		SetHeader("Content-Type", "application/json").
-		SetBody(sessionInfo).
-		Post(samURL)
-
+	// Step 1: GET cas-sso/login page to extract croypto and execution
+	r.log("Fetching cas-sso login page...")
+	resp, err := r.client.R().Get(casSSOURL)
 	if err != nil {
-		return fmt.Errorf("SAM login failed: %w", err)
+		return fmt.Errorf("failed to fetch cas-sso page: %w", err)
 	}
 
-	// Client redirect to YSU CAS server
-	casRedirectURL := "https://auth1.ysu.edu.cn/sam-sso/clientredirect?client_name=sidadapter&service=https://auth1.ysu.edu.cn/portal/entry/pc/authenticate;flowParams=undefined;from="
-	resp, err = r.client.R().Get(casRedirectURL)
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(resp.String()))
 	if err != nil {
-		return fmt.Errorf("CAS redirect failed: %w", err)
+		return fmt.Errorf("failed to parse cas-sso page: %w", err)
 	}
 
-	if !strings.Contains(resp.Request.URL, "cer.ysu.edu.cn") && !strings.Contains(resp.Request.URL, "ticket=") {
-		return fmt.Errorf("CAS redirection failed. Expected redirect to CAS server or successful login, but got: %s", resp.Request.URL)
+	croypto := strings.TrimSpace(doc.Find("p#login-croypto").Text())
+	execution := strings.TrimSpace(doc.Find("p#login-page-flowkey").Text())
+	if croypto == "" || execution == "" {
+		return fmt.Errorf("failed to extract croypto/execution from cas-sso page")
+	}
+	r.log(fmt.Sprintf("Got croypto: %s..., execution length: %d", croypto[:20], len(execution)))
+
+	// Step 2: Encrypt password with AES-ECB
+	encryptedPassword, err := utils.AESEncryptECB(croypto, password)
+	if err != nil {
+		return fmt.Errorf("failed to encrypt password: %w", err)
+	}
+	encryptedCaptcha, err := utils.AESEncryptECB(croypto, "{}")
+	if err != nil {
+		return fmt.Errorf("failed to encrypt captcha payload: %w", err)
 	}
 
-	r.getCurrentNode(sessionInfo, "portal_auth")
-	return nil
+	// Step 3: POST login form
+	postURL := casSSOURL + "&accept-language=zh-CN"
+	r.log("Submitting cas-sso login form...")
+	resp, err = r.client.R().
+		SetFormData(map[string]string{
+			"username":        username,
+			"type":            "UsernamePassword",
+			"_eventId":        "submit",
+			"geolocation":     "",
+			"execution":       execution,
+			"captcha_code":    "",
+			"croypto":         croypto,
+			"password":        encryptedPassword,
+			"captcha_payload": encryptedCaptcha,
+		}).
+		Post(postURL)
+	if err != nil {
+		return fmt.Errorf("cas-sso login request failed: %w", err)
+	}
+
+	finalURL := resp.RawResponse.Request.URL.String()
+	r.log(fmt.Sprintf("Login response URL: %s", finalURL))
+	if strings.Contains(finalURL, "auth-success") || strings.Contains(finalURL, "ticket=") {
+		r.log("CAS-SSO login succeeded (got ticket)")
+		return nil
+	}
+
+	// Check for error message in response
+	errorDoc, err := goquery.NewDocumentFromReader(strings.NewReader(resp.String()))
+	if err == nil {
+		if errorMsg := strings.TrimSpace(errorDoc.Find("#errorMessage").Text()); errorMsg != "" {
+			return fmt.Errorf("login failed: %s", errorMsg)
+		}
+	}
+
+	return fmt.Errorf("CAS-SSO login failed, final URL: %s", finalURL)
 }
 
 // ServiceSelection gets available services
@@ -406,6 +392,9 @@ func (r *RuijieClient) Offline(sessionInfo map[string]string) (map[string]interf
 		return nil, err
 	}
 
+	if data == nil {
+		return nil, nil
+	}
 	return data.(map[string]interface{}), nil
 }
 
@@ -452,15 +441,9 @@ func (r *RuijieClient) GetAvailableServices(username, password string) (interfac
 	}
 	r.log(fmt.Sprintf("Got session info: %v", sessionInfo))
 
-	// CAS login
-	casClient := NewCASClient(username, password, r.client, utils.DisplayBoth, r.verbose)
-	if err := casClient.Login(); err != nil {
-		return nil, fmt.Errorf("CAS authentication failed: %w", err)
-	}
-
-	// SAM login
-	if err := r.SAMLogin(sessionInfo); err != nil {
-		return nil, err
+	// CAS-SSO login
+	if err := r.CasSSOLogin(username, password, sessionInfo); err != nil {
+		return nil, fmt.Errorf("CAS-SSO authentication failed: %w", err)
 	}
 
 	// Get services
@@ -493,15 +476,9 @@ func (r *RuijieClient) Login(username, password, service string) error {
 	}
 	r.log(fmt.Sprintf("Got session info: %v", sessionInfo))
 
-	// CAS login
-	casClient := NewCASClient(username, password, r.client, utils.DisplayBoth, r.verbose)
-	if err := casClient.Login(); err != nil {
-		return fmt.Errorf("CAS authentication failed: %w", err)
-	}
-
-	// SAM login
-	if err := r.SAMLogin(sessionInfo); err != nil {
-		return err
+	// CAS-SSO login
+	if err := r.CasSSOLogin(username, password, sessionInfo); err != nil {
+		return fmt.Errorf("CAS-SSO authentication failed: %w", err)
 	}
 
 	// Get services
