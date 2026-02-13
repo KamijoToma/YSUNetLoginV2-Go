@@ -1,0 +1,78 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          # Linux
+          - { goos: linux,   goarch: amd64,   suffix: '' }
+          - { goos: linux,   goarch: arm64,   suffix: '' }
+          - { goos: linux,   goarch: mips,    suffix: '', goarm: '', gomips: softfloat }
+          - { goos: linux,   goarch: mipsle,  suffix: '', goarm: '', gomips: softfloat }
+          - { goos: linux,   goarch: mips64,  suffix: '' }
+          - { goos: linux,   goarch: mips64le,suffix: '' }
+          - { goos: linux,   goarch: loong64, suffix: '' }
+          - { goos: linux,   goarch: riscv64, suffix: '' }
+          - { goos: linux,   goarch: arm,     suffix: '', goarm: '7' }
+          - { goos: linux,   goarch: arm,     suffix: '', goarm: '6' }
+          # Windows
+          - { goos: windows, goarch: amd64,   suffix: '.exe' }
+          - { goos: windows, goarch: arm64,   suffix: '.exe' }
+          # macOS
+          - { goos: darwin,  goarch: amd64,   suffix: '' }
+          - { goos: darwin,  goarch: arm64,   suffix: '' }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          GOMIPS: ${{ matrix.gomips }}
+          CGO_ENABLED: '0'
+        run: |
+          ARMTAG=""
+          if [ "$GOARCH" = "arm" ] && [ -n "$GOARM" ]; then
+            ARMTAG="v${GOARM}"
+          fi
+          BINARY="ruijie-go-${GOOS}-${GOARCH}${ARMTAG}${{ matrix.suffix }}"
+          go build -ldflags "-s -w" -o "${BINARY}" .
+          echo "BINARY=${BINARY}" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BINARY }}
+          path: ${{ env.BINARY }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/*
